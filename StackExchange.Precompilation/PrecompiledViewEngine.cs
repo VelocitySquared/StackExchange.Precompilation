@@ -331,7 +331,12 @@ namespace StackExchange.Precompilation
             return true;
         }
 
-        private static string NormalizeViewName(string viewName)
+        /// <summary>
+        /// Normalizes the view name to force starting wtih ~/ if it starts with just a /.
+        /// </summary>
+        /// <param name="viewName">Path to normalize</param>
+        /// <returns>Normalized path</returns>
+        protected virtual string NormalizeViewName(string viewName)
         {
             return viewName[0] == '/' ? ("~" + viewName) : viewName;
         }
