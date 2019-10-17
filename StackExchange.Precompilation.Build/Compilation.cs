@@ -20,7 +20,7 @@ using System.Threading;
 
 namespace StackExchange.Precompilation
 {
-    class Compilation
+    internal class Compilation
     {
         private readonly PrecompilationCommandLineArgs _precompilationCommandLineArgs;
 
@@ -82,8 +82,17 @@ namespace StackExchange.Precompilation
                 CscArgs = CSharpCommandLineParser.Default.Parse(_precompilationCommandLineArgs.Arguments, _precompilationCommandLineArgs.BaseDirectory, sdkDirectory);
                 Diagnostics = new List<Diagnostic>(CscArgs.Errors);
 
-                // load those before anything else hooks into our AssemlbyResolve...
-                var compilationModules = LoadModules().ToList();
+                // load those before anything else hooks into our AssemlbyResolve.
+                var loader = new PrecompilationModuleLoader(PrecompilerSection.Current);
+                loader.ModuleInitializationFailed += (module, ex) =>
+                {
+                    Diagnostics.Add(Diagnostic.Create(
+                        FailedToCreateModule,
+                        Location.Create(AppDomain.CurrentDomain.SetupInformation.ConfigurationFile, new TextSpan(), new LinePositionSpan()),
+                        module.Type,
+                        ex.Message));
+                };
+                var compilationModules = loader.LoadedModules;
 
                 if (Diagnostics.Any())
                 {
@@ -94,20 +103,22 @@ namespace StackExchange.Precompilation
                 var outputPath = Path.Combine(CscArgs.OutputDirectory, CscArgs.OutputFileName);
                 var pdbPath = CscArgs.PdbPath ?? Path.ChangeExtension(outputPath, ".pdb");
 
-                using (var workspace = CreateWokspace())
+                using (var container = CreateCompositionHost())
+                using (var workspace = CreateWokspace(container))
                 using (var peStream = new MemoryStream())
                 using (var pdbStream = CscArgs.EmitPdb && CscArgs.EmitOptions.DebugInformationFormat != DebugInformationFormat.Embedded ? new MemoryStream() : null)
                 using (var xmlDocumentationStream = !string.IsNullOrWhiteSpace(CscArgs.DocumentationPath) ? new MemoryStream() : null)
-                using (var razorParser = CreateRazorParser(workspace, cancellationToken))
                 {
                     EmitResult emitResult = null;
-                    var project = CreateProject(workspace, razorParser);
+
+                    var documentExtenders = workspace.Services.FindLanguageServices<IDocumentExtender>(_ => true).ToList();
+                    var project = CreateProject(workspace, documentExtenders);
                     CSharpCompilation compilation = null;
                     CompilationWithAnalyzers compilationWithAnalyzers = null;
                     try
                     {
+                        Diagnostics.AddRange((await Task.WhenAll(documentExtenders.Select(x => x.Complete()))).SelectMany(x => x));
                         compilation = await project.GetCompilationAsync(cancellationToken) as CSharpCompilation;
-                        await razorParser.Complete();
                     }
                     catch (Exception ex)
                     {
@@ -263,43 +274,50 @@ namespace StackExchange.Precompilation
             public Assembly LoadFromPath(string fullPath) => _desktopLoader.LoadFromPath(ResolvePath(fullPath));
         }
 
-        private static AdhocWorkspace CreateWokspace()
+        private CompositionHost CreateCompositionHost()
         {
             var assemblies = new[]
             {
                 "Microsoft.CodeAnalysis.Workspaces",
                 "Microsoft.CodeAnalysis.CSharp.Workspaces",
                 "Microsoft.CodeAnalysis.Workspaces.Desktop",
+                "StackExchange.Precompilation.MVC5",
             };
 
             var parts = new List<Type>();
             foreach (var a in assemblies)
             {
-                // https://msdn.microsoft.com/en-us/library/system.reflection.assembly.gettypes(v=vs.110).aspx#Anchor_2
                 try
                 {
-                    parts.AddRange(Assembly.Load(a).GetTypes());
+                    parts.AddRange(Assembly.Load(a)?.GetTypes() ?? Enumerable.Empty<Type>());
                 }
                 catch (ReflectionTypeLoadException thatsWhyWeCantHaveNiceThings)
                 {
-                    parts.AddRange(thatsWhyWeCantHaveNiceThings.Types);
+                    // https://msdn.microsoft.com/en-us/library/system.reflection.assembly.gettypes(v=vs.110).aspx#Anchor_2
+                    parts.AddRange(thatsWhyWeCantHaveNiceThings.Types.Where(x => x != null));
+                }
+                catch (FileNotFoundException nfe) when (nfe.FileName == "StackExchange.Precompilation.MVC5")
+                {
+                    // enable this to be loaded dynamically
                 }
             }
-            parts.RemoveAll(x => x == null);
 
-            var container = new ContainerConfiguration()
+            return new ContainerConfiguration()
                 .WithParts(parts)
                 .WithPart<CompilationAnalyzerService>()
                 .WithPart<CompilationAnalyzerAssemblyLoader>()
                 .CreateContainer();
+        }
 
+        private static AdhocWorkspace CreateWokspace(CompositionHost container)
+        {
             var host = MefHostServices.Create(container);
             // belive me, I did try DesktopMefHostServices.DefaultServices
             var workspace = new AdhocWorkspace(host, WorkspaceKind);
             return workspace;
         }
 
-        private Project CreateProject(AdhocWorkspace workspace, RazorParser razorParser)
+        private Project CreateProject(AdhocWorkspace workspace, List<IDocumentExtender> documentExtenders)
         {
             var projectInfo = CommandLineProject.CreateProjectInfo(CscArgs.OutputFileName, "C#", Environment.CommandLine, _precompilationCommandLineArgs.BaseDirectory, workspace);
 
@@ -309,53 +327,9 @@ namespace StackExchange.Precompilation
                 .WithDocuments(
                     projectInfo
                         .Documents
-                        .Select(d => Path.GetExtension(d.FilePath) == ".cshtml"
-                            ? razorParser.Wrap(d)
-                            : d));
-
-            //projectInfprojectInfo.WithCompilationOptions(CscArgs.CompilationOptions.WithSourceReferenceResolver(new SourceFileResolver(CscArgs.SourcePaths, CscArgs.BaseDirectory, CscArgs.PathMap)));
-            //Console.WriteLine(projectInfo.CompilationOptions.SourceReferenceResolver.NormalizePath());
+                        .Select(d => documentExtenders.Aggregate(d, (doc, ex) => ex.Extend(doc))));
 
             return workspace.AddProject(projectInfo);
-        }
-
-        private IEnumerable<ICompileModule> LoadModules()
-        {
-            var compilationSection = PrecompilerSection.Current;
-            if (compilationSection == null) yield break;
-
-            foreach(var module in compilationSection.CompileModules.Cast<CompileModuleElement>())
-            {
-                ICompileModule compileModule = null;
-                try
-                {
-                    var type = Type.GetType(module.Type, true);
-                    compileModule = Activator.CreateInstance(type, true) as ICompileModule;
-                }
-                catch(Exception ex)
-                {
-                    Diagnostics.Add(Diagnostic.Create(
-                        FailedToCreateModule,
-                        Location.Create(AppDomain.CurrentDomain.SetupInformation.ConfigurationFile, new TextSpan(), new LinePositionSpan()),
-                        module.Type,
-                        ex.Message));
-                }
-                if (compileModule != null)
-                {
-                    yield return compileModule;
-                }
-            }
-        }
-
-        private RazorParser CreateRazorParser(Workspace workspace, CancellationToken cancellationToken)
-        {
-            var dir = PrecompilerSection.Current?.RazorCache?.Directory;
-            dir = string.IsNullOrWhiteSpace(dir)
-                ? Environment.GetEnvironmentVariable(nameof(Precompilation) + "_" + nameof(PrecompilerSection.RazorCache) + nameof(RazorCacheElement.Directory))
-                : dir;
-            return string.IsNullOrWhiteSpace(dir)
-                ? new RazorParser(workspace, cancellationToken, this)
-                : new RazorParser(workspace, cancellationToken, this, Directory.CreateDirectory(Path.Combine(CscArgs.OutputDirectory, dir)));
         }
 
         private bool TryOpenFile(string path, out Stream stream)
@@ -404,43 +378,6 @@ namespace StackExchange.Precompilation
             }
         }
 
-        class CompileContext
-        {
-            private readonly ICompileModule[] _modules;
-            public BeforeCompileContext BeforeCompileContext { get; private set; }
-            public AfterCompileContext AfterCompileContext { get; private set; }
-            public CompileContext(IEnumerable<ICompileModule> modules)
-            {
-                _modules = modules == null ? new ICompileModule[0] : modules.ToArray();
-            }
-            public void Before(BeforeCompileContext context)
-            {
-                Apply(context, x => BeforeCompileContext = x, m => m.BeforeCompile);
-            }
-            public void After(AfterCompileContext context)
-            {
-                Apply(context, x => AfterCompileContext = x, m => m.AfterCompile);
-            }
-            private void Apply<TContext>(TContext ctx, Action<TContext> setter, Func<ICompileModule, Action<TContext>> actionGetter)
-                where TContext : ICompileContext
-            {
-                setter(ctx);
-                foreach(var module in _modules)
-                {
-                    try
-                    {
-                        var action = actionGetter(module);
-                        action(ctx);
-                    }
-                    catch (Exception ex)
-                    {
-                        var methodName = ctx is BeforeCompileContext ? nameof(ICompileModule.BeforeCompile) : nameof(ICompileModule.AfterCompile);
-                        throw new PrecompilationModuleException($"Precompilation module '{module.GetType().FullName}.{methodName}({typeof(TContext)})' failed", ex);
-                    }
-                }
-            }
-        }
-
         private sealed class NaiveReferenceResolver : MetadataReferenceResolver
         {
             private NaiveReferenceResolver() { }
@@ -462,12 +399,11 @@ namespace StackExchange.Precompilation
         {
             return Location.Create(path, new TextSpan(), new LinePositionSpan());
         }
+    }
 
-        private class PrecompilationModuleException : Exception
-        {
-            public PrecompilationModuleException(string message, Exception inner) : base(message, inner)
-            {
-            }
-        }
+    public interface IDocumentExtender : ILanguageService
+    {
+        DocumentInfo Extend(DocumentInfo document);
+        Task<ICollection<Diagnostic>> Complete();
     }
 }

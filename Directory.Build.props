@@ -11,9 +11,23 @@
     <Authors>m0sa</Authors>
     <Copyright>Stack Exchange 2017</Copyright>
     <PackageTags>Razor AspNet MsBuild Roslyn Metaprogramming</PackageTags>
-    <RepositoryUrl>https://github.com/StackExchange/StackExchange.Precompilation</RepositoryUrl>
+    <RepositoryUrl>https://github.com/StackExchange/StackExchange.Precompilation.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
     <ProjectUrl>https://github.com/StackExchange/StackExchange.Precompilation</ProjectUrl>
     <PackageReleaseNotes><![CDATA[
+Version 5.1.0
+* updating roslyn packages to 2.10.0
+* updating mvc packages to 5.2.7
+* fixing SourceLink support for native pdbs
+
+Version 5.0.0
+* updating how Precompilation.Build resolves it's Workspaces dependency
+* retiring Precompilation.Metaprogramming
+* support running compilation modules at runtime in RoslynRazorViewEngine
+* split out System.Web / MVC5 portions into a separate package
+* bumping aspnet mvc packages to 5.2.4
+* updating roslyn packages to 2.8.2
+
 Version 4.7.0
 * updated roslyn packages to 2.7.0
 * cleaned up diagnostics numbers

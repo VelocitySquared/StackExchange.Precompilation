@@ -1,11 +1,5 @@
-﻿extern alias aliastest;
-
-using System;
-using System.Collections.Generic;
-using System.Linq;
+﻿using System;
 using System.Runtime.CompilerServices;
-using System.Text;
-using System.Threading.Tasks;
 using Test.Module;
 
 namespace Test.ConsoleApp
@@ -14,13 +8,16 @@ namespace Test.ConsoleApp
     {
         static void Main(string[] args)
         {
-            Console.WriteLine(PathMapTest());
-            Console.WriteLine(nameof(aliastest::System.Data.DataSet));
-            Console.ReadLine().Dump();
+            Console.WriteLine(PathMapTest().Dump());
+#if NET462
+            Console.WriteLine(typeof(AliasTest).FullName);
+#endif
         }
 
         // path mapping test, configured via <PathMap> property in the .csproj
         static string PathMapTest([CallerFilePath] string path = null) =>
-            path.StartsWith("https://example.org/") ? path : throw new InvalidOperationException();
+            path.StartsWith("X:\\Test\\")
+                ? path
+                : throw new InvalidOperationException($"CallerFilePath was expected to start with X:\\Test\\ but was {path}.");
     }
 }
