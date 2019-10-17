@@ -14,8 +14,8 @@
     <AppDesignerFolder>Properties</AppDesignerFolder>
     <RootNamespace>Test.WebApp</RootNamespace>
     <AssemblyName>Test.WebApp</AssemblyName>
-    <TargetFramework>net462</TargetFramework>
-    <TargetFrameworkVersion>v4.6.2</TargetFrameworkVersion>
+    <TargetFramework>net472</TargetFramework>
+    <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
     <MvcBuildViews>false</MvcBuildViews>
     <UseIISExpress>true</UseIISExpress>
     <IISExpressSSLPort />
